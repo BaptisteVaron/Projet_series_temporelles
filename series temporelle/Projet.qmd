@@ -1,0 +1,525 @@
+---
+title: "Evolution de la température en france"
+format: html
+editor: visual
+author: "VARON,DIAKITE"
+---
+
+```{r echo=FALSE, warning=FALSE, message=FALSE }
+library(readr)
+library(xts)
+library(readxl)
+library(astsa)
+library(ggfortify)
+library(forecast)
+library(fpp2)
+library(seasonal)
+library(tseries)
+library(TTR)
+library(urca)
+library(dplyr)
+library(lubridate)
+library(writexl)
+library(prophet)
+library(ggplot2)
+```
+
+Sous PBI
+
+-   serie initial
+
+-   autocor/autocov(recuperer un valeur ACF) + autocov partiel
+
+-   desaissonalisation : cvs ( 1er methode : 1 serie csv (moyenne mobile))
+
+-   decommposition un serie : s + tendance ( focntion de decompositon de R)
+
+-   prevision : lissage exponentiel ( holt winter) + comparaison avec l'outil auto de PBI
+
+-   Annexe(PROPHETE - facebook-R)
+
+-   Rendu final(PBI) . R commenté
+
+# 1) Importation des données et traitement des valeurs manquantes
+
+Ce projet est consacré à l’étude de l’évolution des températures en France entre 1970 et 2013, avec l’objectif de détecter d’éventuels signes de réchauffement climatique. À travers cette analyse, nous cherchons à mieux comprendre comment les températures ont évolué au fil du temps et si ces changements suggèrent une tendance à un réchauffement futur. Pour cela, nous utilisons des modèles de séries temporelles comme Holt-Winters , Prophet(facebook), etc afin de saisir les variations mensuelles des températures. En explorant ces données, nous espérons non seulement identifier des tendances générales, mais aussi observer les fluctuations saisonnières et leurs éventuelles conséquences. L’idée est de poser un regard sur les tendances passées pour imaginer les défis climatiques de demain.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+# Chargement des données
+fich <- read.csv("donneetemp.csv", header = TRUE)
+
+# Sélectionn des colonnes d'intérêt
+fich <- fich[, 1:2]
+colnames(fich) <- c("Dates", "Temperature")
+sum(is.na(fich))
+# Suppression de valeurs manquantes
+fich <- na.omit(fich)
+
+# Convertir en format Date
+fich$Dates <- as.Date(fich$Dates)
+
+# Transformer en série temporelle avec xts
+fich_xts <- xts(fich$Temperature, order.by = fich$Dates)
+summary(fich_xts)
+boxplot(fich_xts, main = "Boxplot des Températures")  
+```
+
+Notre jeu de données ne contient pas de valeurs manquantes, et le boxplot ne montre aucune valeur aberrante. En observant le boxplot, on remarque que la moyenne des températures se situe autour de 11°C, ce qui confirme une tendance relativement stable des températures sur la période analysée.
+
+# 2)Distribution des données
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+ # look at the description of the series
+plot(fich_xts)
+
+# a) Depict the histogram of "elecequip". Set the number of class to 20 in "breaks" option.
+hist(fich_xts, 
+     breaks = 20, # number of class
+     main = "temperature  Jan. 1970 to Aout. 2013",
+     xlab = "")
+
+# b) Depict the kernel density of "elecequip".
+plot(density(fich_xts))
+
+# c) Plot the histogram and the kernel density of"temp" along with normal distribution
+hist(fich_xts, breaks=20, probability = TRUE, main = "temp", xlab = "")
+curve(dnorm(x, mean=mean(fich), sd=sd(fich_xts)), col="darkblue", lwd=2, add=TRUE, yaxt="n")
+lines(density(fich_xts), lwd = 2, col = "red")
+
+# d) Depict the Boxplot of "temp".
+boxplot(fich_xts, horizontal = TRUE, main = "temp")
+
+# e) Depict the QQ-plot "temp" for normality test.
+qqnorm(fich_xts, main = "temp")
+qqline(fich_xts, col = "red")
+
+```
+
+L’histogramme de la température met en évidence plusieurs éléments importants :
+
+La distribution ne semble pas strictement normale (gaussienne).
+
+On observe deux zones de forte densité : une entre 4°C et 14°C, une autre entre 15°C et 22°C.
+
+Cela suggère la présence de deux régimes thermiques — possiblement liés aux saisons de transition (printemps/automne) et à l’été.
+
+Extrêmes peu fréquents :
+
+Les températures inférieures à 0°C (hiver rigoureux) ainsi que supérieures à 22°C (périodes de chaleur intense) sont beaucoup plus rares.
+
+Ces valeurs extrêmes apparaissent comme des queues de distribution et renforcent l’idée d’un climat modéré.
+
+Hypothèse d’un mélange de lois normales :
+
+La forme globale pourrait être approchée par un mélange de deux lois normales (gaussiennes), ce qui est typique dans les séries météorologiques comprenant des cycles saisonniers.
+
+# 3)Analyse de la série
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+plot(fich_xts, main = "Évolution de la Température Moyenne", col = "blue", 
+     ylab = "Température (°C)", xlab = "Année")
+```
+
+Graphiquement, on remarque une saisonnalité annuelle marquée, mais des tests supplémentaires sont nécessaires pour confirmer la tendance, qui semble soit invisible, soit inexistante.
+
+## a) ACF/PACF
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#a) Depict the autocorrelation function of "elecequip" using acf().
+acf(fich_xts, main = "FA of température")
+
+# b) Depict the partial autocorrelation function of "elecequip" using pacf().
+pacf(fich_xts, main = "FAP temp")
+
+# c) Use acf2() from astsa to plot the sample P/ACF pair for the generated data x. Comment.
+acf2(fich_xts)
+
+
+```
+
+Les pics alternants entre valeurs positives et négatives dans l'ACF indiquent une saisonnalité marquée. On remarque une autocorrélation persistante sur plusieurs lags, en particulier aux lags 1, 2, 12, 24, etc. Quant au PACF, il chute brusquement après le lag 4, ce qui suggère un modèle MA(4).
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+moving_avg <- rollmean(fich_xts, k = 12, fill = NA)
+summary(moving_avg)
+plot(fich_xts, main = "Température Moyenne avec Tendance", col = "blue")
+lines(moving_avg, col = "red", lwd = 2) # Ajout de la tendance
+
+```
+
+D'après la moyenne mobile en rouge, qui tourne autour de 11°C et reste constante au fil du temps, il n'y a pas de tendance apparente. Cette observation est confirmée par la décomposition de la série.
+
+## b)Décompostion de la série
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Convertir la série en un objet ts avec une fréquence annuelle (12 mois)
+fich_ts <- ts(fich_xts, frequency = 12)
+
+# Décomposition additive
+decomposed <- decompose(fich_ts, type = "additive")
+
+# Affichage des composants
+plot(decomposed)
+
+decomposed_mult <- decompose(fich_ts, type = "multiplicative")
+plot(decomposed_mult)
+```
+
+Ces deux graphiques représentent la décomposition additive et multiplicative de la série. Dans la décomposition additive, en traçant la moyenne mobile, nous remarquons qu'elle est presque constante (autour de 11°C), ce qui confirme l'absence de tendance. En revanche, on observe une forte saisonnalité annuelle. Les graphiques des résidus sont aléatoires, ce qui confirme que la série suit un modèle additive.
+
+Concernant la décomposition multiplicative, les résidus ne semblent pas être aléatoires, ce qui renforce l'hypothèse que notre série est bien additive. Étant additive, une transformation de Box-Cox n'aura pas d'impact significatif. Nous verrons d'ailleurs qu'après avoir appliqué une transformation logarithmique, la série reste inchangée.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+autoplot(fich_xts)
+
+
+fich_xts %>% BoxCox(lambda = 0) %>% autoplot() # egale autoplot(log(fich))
+fich_xts %>% BoxCox(lambda = 0.1) %>% autoplot()
+fich_xts %>% BoxCox(lambda = 0.2) %>% autoplot()
+fich_xts %>% BoxCox(lambda = 0.3) %>% autoplot()
+
+# c) Now compare your chosen value of lambda with the one returned by BoxCox.lambda()
+BoxCox.lambda(fich_xts)
+```
+
+Le meilleur lambda étant 0,95, presque égal à 1, il n'y a pas de changement significatif après la transformation, ce qui confirme que la série est additive.\
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+fich_ts <- ts(fich_xts, frequency = 12)  
+
+seas_test <- nsdiffs(fich_ts)  # Nombre de différenciations saisonnières nécessaires
+seas_test
+
+
+```
+
+Le nombre de différenciations saisonnières nécessaire est égal à 1, ce qui indique qu'une seule différenciation suffit pour éliminer la composante saisonnière.\
+
+## c) désaisonnalisation avec moyenne mobile
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Composante saisonnière (brute)
+saisonnalite <- fich_xts - moving_avg
+plot(moving_avg)
+plot(saisonnalite)
+# Extraire le mois de chaque observation
+
+mois <- month(index(fich_xts))
+# Moyenne de la saisonnalité pour chaque mois
+saison_moy <- tapply(saisonnalite, mois, mean, na.rm = TRUE)
+
+# Associer à chaque observation
+coef_saisonnier <- saison_moy[as.character(mois)]
+
+coef_saisonnier_xts <- xts(coef_saisonnier, order.by = index(fich_xts))
+# Désaisonnalisation (modèle additif)
+desaisonnalisée <- fich_xts - coef_saisonnier_xts
+
+# Tracer
+plot(desaisonnalisée , col= "red")
+plot(fich_xts, main = "Série originale vs désaisonnalisée", col = "black")
+lines(desaisonnalisée, col = "blue")
+
+```
+
+Le graphique en rouge représente la série désaisonnalisée, où les températures varient entre 5°C et 16°C après élimination de la saisonnalité.
+
+## d) différenciation saisonniére
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Différenciation saisonnière pour une saisonnalité annuelle (période 12)
+fich_xts_seasonal_diff <- diff(fich_xts, lag = 12)
+
+summary(fich_xts_seasonal_diff)
+fich_ts <- ts(fich_xts_seasonal_diff, frequency = 12)  
+seas_test <- nsdiffs(fich_ts)  
+seas_test
+
+
+plot(fich_xts_seasonal_diff)
+#adf.test(na.omit(fich_xts_seasonal_diff))
+
+```
+
+Nous observons que la composante saisonnière a été éliminée et que le nombre de différenciations nécessaires est égal à 0, ce qui indique que la série a été correctement différenciée.
+
+## e) Décomposition de la série différenciée
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+fich_ts <- ts(fich_xts_seasonal_diff, frequency = 12)
+
+# Décomposition additive
+decomposed <- decompose(fich_ts, type = "additive")
+
+# Affichage des composants
+plot(decomposed)
+
+decomposed_mult <- decompose(fich_ts, type = "multiplicative")
+plot(decomposed_mult)
+```
+
+Avec la décomposition de la série différenciée, nous remarquons que la saisonnalité a disparu et qu'il n'y a plus de tendance. Nous allons maintenant vérifier la stationnarité de la série à l'aide des tests de racine unitaire.
+
+## f) ACF/PACF de la série différenciée
+
+## 
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#a) Depict the autocorrelation function of "elecequip" using acf().
+acf(na.omit(fich_xts_seasonal_diff, main = "FA of température"))
+
+# b) Depict the partial autocorrelation function of "elecequip" using pacf().
+pacf(na.omit(fich_xts_seasonal_diff, main = "FAP temp"))
+
+# c) Use acf2() from astsa to plot the sample P/ACF pair for the generated data x. Comment.
+acf2(na.omit(fich_xts_seasonal_diff))
+```
+
+Avec le correlogramme et pacf de la série differencie , il n'a plus de saisonnalité et et ont voit que claire qu'avec cette serie , le PACF nous montre que seul le lag12 est significatif , typique d'un MA(1)
+
+## h) test de Dickey-Fuller augmenté
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Effectuer le test de Dickey-Fuller augmenté
+#adf_test <- adf.test(na.omit(fich_xts_seasonal_diff))
+#adf_test
+adf_test1 <- adf.test(na.omit(fich_xts))
+adf_test1
+```
+
+La p-value étant inférieure à 5 %, la série est considérée comme stationnaire et nous rejetons donc l'hypothèse nulle. Cependant, nous allons confirmer cela en utilisant les tests unitaires.
+
+### hh) Test de Racine Unitaire
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# a) Proceed to the ADF unit root test for "lop". Choose 5% significance level to make your decision
+#test_none <- ur.df(na.omit(fich_xts), type = "none", lags = 12)
+#summary(test_none)
+summary(ur.df(na.omit(fich_xts), type = "trend", lags = 12, selectlags="AIC")) #avec aic on lui laisse le 
+
+```
+
+```         
+tt = 2.547 < 2.79, donc il n'est pas nécessaire de réaliser un test de racine unitaire. La tendance n'est pas significative, et nous passons au modèle 2.
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+summary(ur.df(fich_xts, type = "drift", lags = 12, selectlags="AIC"))
+```
+
+```         
+On se concentre sur la constante, qui est égale à 3.500, et qui est supérieure à 3.11. La constante est donc significative. Nous procédons maintenant au test de la racine unitaire.
+```
+
+D'après la sortie R, le test de la statistique de test donne une valeur de -3,49, qui est inférieure à -2,86. Cela signifie qu'il n'est pas nécessaire de faire une différenciation, car il n'y a pas de racine unitaire. Notre modèle est déjà stationnaire.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+test_perron <- ur.za(fich_xts, model = "both", lag = 12)
+summary(test_perron)
+test_adf <- ur.df(na.omit(fich_xts, type = "drift", lags = 12))
+summary(test_adf)
+
+
+```
+
+Nous avons appliqué le test de Zivot-Andrews afin de détecter une éventuelle stationnarité de la série en présence d’une rupture structurelle endogène, c’est-à-dire sans spécifier a priori la date de changement.
+
+Statistique du test observée : −5.159
+
+Au seuil de 1 % : −5.57\
+Au seuil de 5 % : −5.08\
+Au seuil de 10 % : −4.82
+
+La statistique observée (−5.1593) est inférieure à la valeur critique de 5 % (−5.08), ce qui permet de rejeter l’hypothèse nulle de racine unitaire. La série est donc stationnaire à un seuil de confiance de 95 %, en tenant compte d’une rupture structurelle.
+
+En conclusion, d'après les différents tests, notre série est stationnaire en moyenne et en variance. Nous pouvons donc appliquer différents modèles de prédictions comme ARIMA.
+
+# 4) Prevision ARIMA
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# modele ARIMA
+fich_xts %>% Arima(order = c(4, 0, 1)) %>% forecast(h=10*12) %>% autoplot()
+
+mod_arima <- auto.arima(fich_xts)
+summary(mod_arima)
+
+#mod = auto.arima(na.omit(fich_xts_seasonal_diff ))
+#summary(mod)
+forecast_arima <- forecast(mod_arima , h = 10*12)
+autoplot(forecast_arima)
+
+```
+
+\
+Le modèle ajusté est un ARIMA(4,0,1) avec moyenne non nulle. Tous les coefficients AR (ar1 à ar4) et MA (ma1) sont significatifs (petites erreurs standards par rapport aux valeurs des coefficients). La variance résiduelle est de 3.214, et l'AIC est relativement bas (2111.68), ce qui indique un modèle assez performant.
+
+Concernant les erreurs d'ajustement sur l'échantillon d'apprentissage, le biais moyen (ME) est presque nul (-0.0045), ce qui montre que le modèle ne présente pas de biais systématique. Les erreurs globales (RMSE = 1.78, MAE = 1.41) restent modérées. Le MAPE (\~24 %) montre une erreur moyenne relative raisonnable. De plus, l'ACF du résidu au premier décalage (-0.017) est très proche de zéro, suggérant peu d'autocorrélation résiduelle.
+
+**En résumé**, le modèle est globalement bien ajusté, sans biais marqué et avec des erreurs acceptables pour la série temporelle considérée.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+checkresiduals(forecast_arima)
+
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+test_adf <- ur.df(residuals(forecast_arima), type = "drift", lags = 12)
+summary(test_adf)
+
+```
+
+Bien que le test ADF appliqué aux résidus confirme leur stationnarité, le test de Ljung-Box révèle une autocorrélation résiduelle significative. Cela suggère que le modèle ARIMA(4,0,1) n'a pas totalement capturé la structure dépendante de la série. Il serait pertinent d'envisager des modèles plus complexes ou d'ajuster les ordres pour améliorer l'ajustement.
+
+# 5) lissage exponentiel(Holt Winter)
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# 🔹 Vérifier que la série a une fréquence mensuelle
+fich_xts <- ts(fich_xts, frequency = 12)
+
+# 🔹 Lissage exponentiel de Holt-Winters (additif si saisonnalité constante)
+modele_hw <- hw(fich_xts, seasonal = "additive", h = 120)
+summary(modele_hw)
+checkresiduals(modele_hw)
+# 🔹 Tracer la prévision
+autoplot(modele_hw)
+
+start_date <- as.Date("2013-09-01")
+
+# 🔹 Générer la séquence de dates pour les prévisions
+dates_forecast <- seq.Date(from = start_date, by = "month", length.out = 120)
+# 🔹 Création du DataFrame avec les prévisions
+df_pred <- data.frame(
+  Date = dates_forecast,
+  Température_Observée = NA,
+  Moy_Mobile = NA,
+  Prévision = as.numeric(modele_hw$mean),
+  IC_min = as.numeric(modele_hw$lower[,2]),
+  IC_max = as.numeric(modele_hw$upper[,2])
+)
+
+
+# 🔹 Données historiques
+df_hist <- data.frame(
+  Date = as.Date((fich$Dates)),
+  Température_Observée = as.numeric(fich_xts),
+  Moy_Mobile = as.numeric(zoo::rollmean(fich_xts, k = 12, fill = NA)),
+  Prévision = NA,
+  IC_min = NA,
+  IC_max = NA
+)
+#tail(df_hist$Date)
+#head(df_pred$Date)
+# 🔹 Fusion
+df_final <- bind_rows(df_hist, df_pred)
+#df_final
+# 🔹 Sauvegarde pour Power BI
+write_csv(df_final, "previsions_powerbi_holtwinters.csv" )
+write_xlsx(df_final, "previsions_powerbi_holtwinters.xlsx")
+
+
+
+```
+
+Nous avons utilisé le modèle **Holt-Winters additif** pour prévoir les températures mensuelles de 2013 à 2023. Ce modèle, qui prend en compte le **niveau**, la **tendance** et la **saisonnalité** des données, nous a permis de capturer efficacement l’effet saisonnier bien marqué des températures.\
+Les paramètres de lissage (alpha ≈ 0.0004, beta ≈ 0.0004, gamma ≈ 0.0011) sont très faibles, ce qui indique une grande **stabilité du modèle** et une **faible réactivité aux variations** de court terme. Le niveau initial est estimé à **10,44°C**, avec une tendance légèrement négative (**-0,0043°C/mois**), traduisant une très légère baisse des températures sur la période. L'effet saisonnier met en évidence des hivers significativement plus froids et des étés plus chauds.
+
+Les performances d'ajustement sont correctes, avec un **RMSE** de **1,4°C**, un **MAE** de **1,1°C** et un **MAPE** d’environ **20 %**, ce qui montre que le modèle présente des erreurs de prévision raisonnables. Le **MASE** inférieur à 1 confirme que le modèle est **plus performant qu'une prévision naïve**. De plus, un **ACF1 faible** (≈ 0,14) suggère une faible autocorrélation des erreurs, renforçant la crédibilité du modèle.
+
+L'analyse des résidus révèle qu'ils sont **centrés autour de zéro**, sans tendance systématique et avec une **variance relativement constante**. L'histogramme des résidus suggère une distribution **proche de la normale**. Surtout, le **test de Ljung-Box** appliqué aux résidus fournit une **p-value de 0,2519**, ce qui indique **l'absence d'autocorrélation significative** et valide les hypothèses classiques sur les erreurs.
+
+En conclusion, **le modèle Holt-Winters additif est bien ajusté** aux données et constitue un outil fiable pour prévoir les températures futures avec un niveau d’erreur acceptable.
+
+# 6) comparaison Arima et Holt Winter
+
+En conclusion, bien que le modèle **ARIMA(4,0,1)** présente des critères d'ajustement plus favorables avec des AIC et BIC plus bas (AIC = 2111.68), il ne parvient pas à capturer correctement la structure temporelle des données, comme l'indique le test de Ljung-Box avec un p-value très faible (3.553e-15). D'autre part, le modèle **Holt-Winters additive** montre de meilleures performances sur les erreurs d'entraînement avec un RMSE de 1.396 et une MAPE de 20.41549, tout en présentant des résidus indépendants (p-value de 0.2519), ce qui suggère qu'il est mieux adapté pour cette série de température. Par conséquent, **Holt-Winters additive** semble être le modèle le plus robuste et précis pour cette étude(realtive à comparer avec prophet), malgré un ajustement global légèrement moins favorable en termes d'AIC et BIC.
+
+ANNEXE:
+
+# 7) Prévision avec prophet de facebook
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#install.packages("prophet")
+
+# 🔹 Préparer les données pour Prophet (colonnes : ds = date, y = température)
+df_prophet <- fich %>%
+  select(ds = Dates, y = Temperature)
+
+# 🔹 Entraîner le modèle Prophet
+m <- prophet(df_prophet)
+
+# 🔹 Créer un futur DataFrame pour prédire 10 ans (120 mois)
+future <- make_future_dataframe(m, periods = 120, freq = "month")
+
+# 🔹 Prévisions
+forecast <- predict(m, future)
+summary(forecast)
+# 🔹  avec les données historiques
+df_forecast <- forecast %>%
+  select(ds, yhat, yhat_lower, yhat_upper) %>%
+  rename(Date = ds,
+         Prévision = yhat,
+         IC_min = yhat_lower,
+         IC_max = yhat_upper)
+
+# 🔹 Joindre avec les vraies valeurs (Température observée)
+df_final <- df_forecast %>%
+  left_join(df_prophet, by = c("Date" = "ds")) %>%
+  rename(Température_Observée = y)
+
+
+# 🔹 Tracer les prévisions de Prophet
+ggplot(df_final, aes(x = Date)) +
+  geom_line(aes(y = Température_Observée), color = "black", size = 0.8, alpha = 0.5) +  # Température observée
+  geom_line(aes(y = Prévision), color = "blue", size = 1) +  # Prévision Prophet
+  geom_ribbon(aes(ymin = IC_min, ymax = IC_max), fill = "blue", alpha = 0.2) +  # Intervalles de confiance
+  labs(title = "Prévisions de Température avec Prophet",
+       x = "Date", y = "Température") +
+  theme_minimal()
+
+# 🔹 Sauvegarder pour Power BI
+write_csv(df_final, "previsions_prophet.csv")
+write_xlsx(df_final, "previsions_prophet.xlsx")
+
+
+# 🔹 Calcul des résidus de Prophet
+df_residus <- data.frame(
+  Date = df_final$Date,
+  Résidus = df_final$Température_Observée - df_final$Prévision
+)
+
+# 🔹 Tracer les résidus
+ggplot(df_residus, aes(x = Date, y = Résidus)) +
+  geom_line() +
+  ggtitle("Résidus de la prévision Prophet") +
+  xlab("Date") +
+  ylab("Résidus") +
+  theme_minimal()
+
+
+```
+
+nous avons utilisé le modèle Prophet pour prévoir l'évolution des températures mensuelles entre 1970 et 2023. Ce modèle de décomposition permet de séparer la série en plusieurs composantes, notamment la tendance, la saisonnalité annuelle et les termes additifs, ce qui nous permet d'examiner en détail le comportement de la température au fil du temps.
+
+**Comportement de la tendance**\
+La composante de tendance montre une stabilité générale, avec une légère croissance des températures au fil des années. La température moyenne reste proche de 11,2°C en début de période, mais atteint 11,58°C en fin de période. Ce léger réchauffement suggère que la tendance globale est en accord avec les observations récentes concernant le réchauffement climatique.
+
+**Saisonnalité annuelle**\
+Le modèle capte une saisonnalité annuelle marquée, avec des températures plus froides en hiver et plus chaudes en été. La variation annuelle est bien représentée, oscillant entre -7,87°C et +8,5°C autour de la tendance. Ce comportement saisonnier est parfaitement adapté aux données mensuelles, et la détection automatique de la saisonnalité annuelle par Prophet est un point fort du modèle.
+
+**Composantes additives**\
+Le modèle a utilisé uniquement des termes additifs pour capturer la saisonnalité, ce qui est logique pour des données mensuelles de températures. L'absence d'effet multiplicatif montre que les variations saisonnières sont suffisamment bien capturées par les termes additifs, ce qui renforce la robustesse de la modélisation.
+
+**Incertitude et intervalles de confiance**\
+Les prévisions du modèle sont accompagnées d'intervalles de confiance relativement étroits, ce qui indique une certaine stabilité et fiabilité dans les prédictions. Cette caractéristique de Prophet nous permet de faire confiance à la solidité des prévisions à long terme.
+
+En conclusion, Prophet s'avère être un modèle fiable pour analyser les séries temporelles de températures mensuelles. Les résultats montrent une tendance légèrement croissante des températures, une forte saisonnalité annuelle bien captée, et une bonne précision dans les prévisions. Les intervalles de confiance étroits indiquent une bonne stabilité du modèle. Ce modèle est donc particulièrement adapté à ce type d'analyse climatique.
+
+### Comparaison avec Holt
+
+Le modèle **Prophet** et le modèle **Holt-Winters additif** présentent des performances distinctes pour la prévision des températures mensuelles de 1970 à 2013. Prophet capture une tendance légèrement croissante, indiquant un réchauffement climatique, et gère efficacement la saisonnalité annuelle avec une amplitude élevée. En revanche, Holt-Winters montre une tendance légèrement négative et une saisonnalité moins marquée. Les prévisions de Prophet sont accompagnées de petits intervalles de confiance, ce qui en fait un modèle plus stable et fiable pour des prévisions à long terme. Holt-Winters, bien qu’efficace avec un RMSE de 1,4°C et un MAPE d’environ 20 %, est moins réactif aux variations à court terme en raison de ses paramètres de lissage faibles. Prophet semble ainsi mieux adapté pour capturer les tendances globales et les fluctuations complexes sur une longue période, tandis que Holt-Winters est plus stable mais moins sensible aux changements non linéaires. En termes de performance, Prophet est plus précis pour les prévisions sur de longues périodes, tandis que Holt-Winters offre un ajustement plus simple mais robuste à court terme.
+
+# 8) Conclusion
+
+L'analyse de l'évolution des températures en France de 1970 à 2013, à travers les modèles Prophet, Holt-Winters et ARIMA, a permis d'identifier plusieurs tendances intéressantes. Au cours des premières décennies, la tendance des températures était relativement stable, avec des fluctuations saisonnières marquées mais sans variation significative à long terme. Cependant, plus récemment, les modèles ont mis en évidence une légère hausse des températures, avec une moyenne qui passe de 11,2°C à 11,58°C, suggérant un réchauffement progressif. Prophet a bien capturé cette légère croissance, tout en gérant efficacement la saisonnalité et les tendances non linéaires. Holt-Winters a aussi détecté cette tendance, bien que de manière plus conservatrice, et a bien modélisé la saisonnalité avec des hivers plus froids et des étés plus chauds. Le modèle ARIMA, tout en étant utile pour saisir les variations passées, n'a pas capté aussi précisément les tendances non linéaires que Prophet. Globalement, ces résultats indiquent qu'après une période de stabilité , les températures en France connaissent une légère augmentation, ce qui pourrait être un signe de réchauffement climatique(on est déja deans). Ces observations soulignent l'importance de continuer à surveiller ces évolutions et de recourir à des modèles adaptés pour mieux anticiper les impacts futurs du changement climatique.
